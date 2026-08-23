@@ -31,34 +31,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 配置 git 身份
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: 配置 CNB Git 凭据
+      - name: 同步到 CNB 仓库
         env:
           CNB_USERNAME: ${{ secrets.CNB_USERNAME }}
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-        run: |
-          git config --global credential.helper store
-          printf 'protocol=https\nhost=cnb.cool\nusername=%s\npassword=%s\n\n' "${CNB_USERNAME}" "${CNB_TOKEN}" | git credential approve
-          FILLED="$(printf 'protocol=https\nhost=cnb.cool\n\n' | git credential fill)"
-          test "$(printf '%s\n' "${FILLED}" | sed -n 's/^username=//p')" = "${CNB_USERNAME}" || { echo "CNB Git 凭据未写入 runner"; exit 1; }
-
-      - name: 同步到 CNB 仓库
-        env:
           CNB_TARGET_REPO: ${{ vars.CNB_TARGET_REPO }}
         run: |
           TARGET="${CNB_TARGET_REPO}"
-          git remote add cnb "https://cnb.cool/${TARGET}.git" 2>/dev/null || git remote set-url cnb "https://cnb.cool/${TARGET}.git"
+          ENCODED_USERNAME="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_USERNAME}")"
+          ENCODED_TOKEN="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_TOKEN}")"
+          CNB_URL="https://${ENCODED_USERNAME}:${ENCODED_TOKEN}@cnb.cool/${TARGET}.git"
           # 读取 CNB 当前 main，使用带 lease 的强制更新：若 CNB 在检查后被他人修改则拒绝覆盖。
-          CNB_HEAD="$(git ls-remote cnb refs/heads/main | awk '{print $1}')"
+          CNB_HEAD="$(git ls-remote "${CNB_URL}" refs/heads/main | awk '{print $1}')"
           if [ -n "${CNB_HEAD}" ]; then
-            git push --force-with-lease=refs/heads/main:${CNB_HEAD} cnb main:main
+            git push --force-with-lease=refs/heads/main:${CNB_HEAD} "${CNB_URL}" main:main
           else
-            git push cnb main:main
+            git push "${CNB_URL}" main:main
           fi
           # tag 只做普通同步，若 CNB 已存在不同内容的同名 tag 则保留 CNB tag 并给出提示。
-          git push --tags cnb || echo "部分 tag 未同步；main 分支已完成同步。"
+          git push --tags "${CNB_URL}" || echo "部分 tag 未同步；main 分支已完成同步。"
