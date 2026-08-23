@@ -18,8 +18,15 @@ jobs:
     # 需要两个 GitHub 仓库 Secret（在 Settings → Secrets and variables → Actions 配置）：
     #   CNB_USERNAME  — CNB 用户名（如 morrowfactory）
     #   CNB_TOKEN     — CNB 访问令牌（个人访问令牌 / 部署令牌），需具备目标仓库写权限
-    if: ${{ secrets.CNB_USERNAME != '' && secrets.CNB_TOKEN != '' }}
     steps:
+      - name: 检查 CNB 同步凭据
+        env:
+          CNB_USERNAME: ${{ secrets.CNB_USERNAME }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          test -n "${CNB_USERNAME}" || { echo "缺少 GitHub Secret: CNB_USERNAME"; exit 1; }
+          test -n "${CNB_TOKEN}" || { echo "缺少 GitHub Secret: CNB_TOKEN"; exit 1; }
+
       - name: 检出代码
         uses: actions/checkout@v4
         with:
