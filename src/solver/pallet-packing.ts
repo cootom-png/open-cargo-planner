@@ -189,6 +189,7 @@ export class PalletPackingSolver {
     let layerIndex = 0;
     let currentTop = 0; // 当前已码放高度（相对托盘上表面）
 
+    const placedByPending = new Map<number, number>();
     // 逐层：每层选择一个"层高"，用 shelf 二维布局铺满一层
     while (itemCount < this.options.maxItemsPerPallet) {
       // 收集本层可行候选（还有需求、可平放、不超重超高）
@@ -254,12 +255,16 @@ export class PalletPackingSolver {
         while (!reachedEnd) {
           let fitted = false;
           for (const cand of orderedLayerCandidates) {
+            const alreadyPlaced = placedByPending.get(cand.pendingIndex) ?? 0;
+            const remaining = pending[cand.pendingIndex]!.quantity;
+            if (alreadyPlaced >= remaining) continue;
             const box = makeBox(x, y, currentTop, cand.orientation.lengthMm, cand.orientation.widthMm, effHeight);
             if (x + box.length > layerL + EPS || y + box.width > layerW + EPS) continue;
             if (placedBoxes.some((pb) => boxOverlap(pb, box))) continue;
             if (cargoWeight + cand.weightG > maxLoad + EPS) break;
             // 放入
             placement.push({ cand, box });
+            placedByPending.set(cand.pendingIndex, alreadyPlaced + 1);
             placedBoxes.push(box);
             cargoWeight += cand.weightG;
             x += box.length + 0;
