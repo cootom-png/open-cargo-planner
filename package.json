@@ -4,11 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "dev": "vite --host 0.0.0.0 --port 8686",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:ts && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 8686",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/**/*.test.js"
+    "test": "npm run build:ts && node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "three": "^0.179.1"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "@types/three": "^0.179.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
   }
 }

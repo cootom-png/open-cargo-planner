@@ -184,65 +184,80 @@ export class PalletPackingSolver {
     const items: PalletItemPlacement[] = [];
     const placedBoxes: Box3[] = [];
     const skuCount = new Map<string, number>();
+    const skuFirstLayer = new Map<string, number>(); // 记录每个SKU首次出现的层
     let cargoWeight = 0;
     let itemCount = 0;
     let layerIndex = 0;
     let currentTop = 0; // 当前已码放高度（相对托盘上表面）
 
+    const placedByPending = new Map<number, number>();
+    
+    // 检测多规格场景：统计有需求的不同产品数
+    const activeProducts = pending.filter((u) => u.quantity > 0).length;
+    const useInterlock = this.options.layerInterlock && activeProducts === 1;
+    
     // 逐层：每层选择一个"层高"，用 shelf 二维布局铺满一层
     while (itemCount < this.options.maxItemsPerPallet) {
       // 收集本层可行候选（还有需求、可平放、不超重超高）
-      type Cand = { pendingIndex: number; orientation: Orientation; weightG: number };
-      let candidates: Cand[] = [];
+      type Cand = { pendingIndex: number; orientation: Orientation; weightG: number; score: number };
+      const candidates: Cand[] = [];
       for (let pi = 0; pi < pending.length; pi += 1) {
         const u = pending[pi]!;
         if (u.quantity <= 0) continue;
         const o = orientCache.get(u.productIndex) ?? [];
+        
+        // 为每个产品选择最优朝向
+        let bestOri: Orientation | null = null;
+        let bestScore = -Infinity;
+        
         for (const ori of o) {
           if (ori.lengthMm <= layerL + EPS && ori.widthMm <= layerW + EPS) {
             // 竖直高度为该朝向的高度
             if (currentTop + ori.heightMm > maxLoadedHeight - deckHeight + EPS) continue;
             if (cargoWeight + u.weightG > maxLoad + EPS) continue;
-            candidates.push({ pendingIndex: pi, orientation: ori, weightG: u.weightG });
+            
+            // 朝向评分：优先长边沿托盘长方向、平放优先、能整除托盘尺寸加分
+            const score = this.scoreOrientation(ori, layerL, layerW);
+            if (score > bestScore) {
+              bestScore = score;
+              bestOri = ori;
+            }
           }
         }
+        
+        // 只保留每个产品的最优朝向
+        if (bestOri) {
+          candidates.push({ pendingIndex: pi, orientation: bestOri, weightG: u.weightG, score: bestScore });
+        }
       }
-      // 去重：同一产品同一几何尺寸只保留一个朝向（按尺寸键去重），保留高度最小的平放朝向；
-      // 但允许同一产品的不同平放朝向（如 LWH 与 WLH）都存在，以便层内长宽方向灵活排布。
-      const seenOrient = new Set<string>();
-      const dedup: Cand[] = [];
-      for (const c of candidates) {
-        const key = `${c.orientation.lengthMm}:${c.orientation.widthMm}:${c.orientation.heightMm}`;
-        if (seenOrient.has(key)) continue;
-        seenOrient.add(key);
-        dedup.push(c);
-      }
-      candidates = dedup;
 
       if (candidates.length === 0) break;
 
-      // 层高 = 本层候选中最高的高度（等高整层码放）；取最高箱高作层高以整齐铺放
-      const layerHeight = Math.max(...candidates.map((c) => c.orientation.heightMm));
-      // 本层只放高度 == layerHeight 的箱（等高），保证层顶平整、层间交错有效
-      const layerCandidates = candidates.filter((c) => Math.abs(c.orientation.heightMm - layerHeight) <= EPS);
-      if (layerCandidates.length === 0) {
-        // 防御：退化为最矮候选单层
-        const min = candidates.sort((a, b) => a.orientation.heightMm - b.orientation.heightMm)[0]!;
-        layerCandidates.push(min);
-        // 重新计算层高
-        // layerHeight 已取最大，这里用 layerCandidates[0] 高度
+      // 单层单朝向策略：选择剩余需求最大的产品作为本层主导产品
+      let chosenCand: Cand | null = null;
+      let maxRemaining = 0;
+      for (const cand of candidates) {
+        const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
+        if (remaining > maxRemaining) {
+          maxRemaining = remaining;
+          chosenCand = cand;
+        }
       }
-      const effHeight = Math.max(...layerCandidates.map((c) => c.orientation.heightMm));
-      // shelf 行沿托盘宽方向推进，行高取本层最大箱宽（y 方向尺寸），保证同层不重叠
-      const effRowWidth = Math.max(...layerCandidates.map((c) => c.orientation.widthMm));
+      
+      if (!chosenCand) break;
+      
+      // 本层只使用选定的产品和朝向
+      const layerCandidates = [chosenCand];
+      const effHeight = chosenCand.orientation.heightMm;
+      const effRowWidth = chosenCand.orientation.widthMm;
 
       if (currentTop + effHeight > maxLoadedHeight - deckHeight + EPS) break;
 
       // shelf 布局（层内二维贪心，x 从托盘左边缘铺满）
       const placement: Array<{ cand: Cand; box: Box3 }> = [];
-      // 层间交错：奇数层对候选顺序倒序，形成砖砌错位；x 仍从 0 起避免浪费
+      // 层间交错：仅在单一产品场景下启用
       const orderedLayerCandidates = [...layerCandidates];
-      if (this.options.layerInterlock && layerIndex % 2 === 1) orderedLayerCandidates.reverse();
+      if (useInterlock && layerIndex % 2 === 1) orderedLayerCandidates.reverse();
       let y = 0;
       let placedThisLayer = 0;
       let progress = true;
@@ -254,12 +269,16 @@ export class PalletPackingSolver {
         while (!reachedEnd) {
           let fitted = false;
           for (const cand of orderedLayerCandidates) {
+            const alreadyPlaced = placedByPending.get(cand.pendingIndex) ?? 0;
+            const remaining = pending[cand.pendingIndex]!.quantity;
+            if (alreadyPlaced >= remaining) continue;
             const box = makeBox(x, y, currentTop, cand.orientation.lengthMm, cand.orientation.widthMm, effHeight);
             if (x + box.length > layerL + EPS || y + box.width > layerW + EPS) continue;
             if (placedBoxes.some((pb) => boxOverlap(pb, box))) continue;
             if (cargoWeight + cand.weightG > maxLoad + EPS) break;
             // 放入
             placement.push({ cand, box });
+            placedByPending.set(cand.pendingIndex, alreadyPlaced + 1);
             placedBoxes.push(box);
             cargoWeight += cand.weightG;
             x += box.length + 0;
@@ -297,6 +316,7 @@ export class PalletPackingSolver {
           layerIndex,
         });
         skuCount.set(sku, (skuCount.get(sku) ?? 0) + 1);
+        if (!skuFirstLayer.has(sku)) skuFirstLayer.set(sku, layerIndex);
         itemCount += 1;
       }
       currentTop += effHeight;
@@ -323,6 +343,35 @@ export class PalletPackingSolver {
       layerCount: layerIndex,
       utilization: capacityDenom > 0 ? boxVolume / capacityDenom : 0,
     };
+  }
+
+  /**
+   * 朝向评分函数：为每个朝向计算优先级分数
+   * - 优先长边沿托盘长方向（减少行数）
+   * - 优先平放（高度小）
+   * - 优先能整除托盘尺寸的朝向
+   */
+  private scoreOrientation(ori: Orientation, palletL: number, palletW: number): number {
+    let score = 0;
+    
+    // 优先长边沿托盘长方向（长边作为 length）
+    if (ori.lengthMm >= ori.widthMm) score += 100;
+    
+    // 优先平放（高度小的朝向）
+    score += (1000 - ori.heightMm) * 0.1;
+    
+    // 优先能整除托盘尺寸的朝向（减少空间浪费）
+    const remainderL = palletL % ori.lengthMm;
+    const remainderW = palletW % ori.widthMm;
+    if (remainderL < 10) score += 50;
+    if (remainderW < 10) score += 50;
+    
+    // 优先能放置更多数量的朝向（面积利用率）
+    const countX = Math.floor(palletL / ori.lengthMm);
+    const countY = Math.floor(palletW / ori.widthMm);
+    score += (countX * countY) * 0.5;
+    
+    return score;
   }
 }
 

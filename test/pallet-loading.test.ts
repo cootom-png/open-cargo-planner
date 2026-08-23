@@ -139,6 +139,22 @@ function assertPalletGap(placements: Placement[], minGap: number = 50): void {
   }
 }
 
+test("托盘码放不超过产品需求数量", () => {
+  const input: PlanInput = {
+    id: "quantity-guard",
+    mode: "pallet",
+    allocationStrategy: "LARGE_FIRST",
+    minimumSupportRatio: 1,
+    products: [product("p1", "SKU-A", 1)],
+    palletTypes: [pallet1200],
+    containerTypes: [container40HQ],
+  };
+  const result = solvePallet(input);
+  const loaded = result.pallets.flatMap((pallet) => pallet.items).filter((item) => item.sku === "SKU-A").length;
+  assert.equal(loaded, 1);
+  assert.equal(result.unloaded.length, 0);
+});
+
 test("托盘装柜：单个托盘装入 40HQ", () => {
   const palletInput: PlanInput = {
     id: "plan-1",
