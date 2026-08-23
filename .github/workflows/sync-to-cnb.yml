@@ -37,17 +37,20 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: 同步到 CNB 仓库
+      - name: 配置 CNB Git 凭据
         env:
           CNB_USERNAME: ${{ secrets.CNB_USERNAME }}
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          git config --global credential.helper store
+          printf 'protocol=https\nhost=cnb.cool\nusername=%s\npassword=%s\n\n' "${CNB_USERNAME}" "${CNB_TOKEN}" | git credential approve
+
+      - name: 同步到 CNB 仓库
+        env:
           CNB_TARGET_REPO: ${{ vars.CNB_TARGET_REPO }}
         run: |
           TARGET="${CNB_TARGET_REPO:-morrowfactory/open-cargo-planner}"
-          ENCODED_USERNAME="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_USERNAME}")"
-          ENCODED_TOKEN="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_TOKEN}")"
-          AUTH_URL="https://${ENCODED_USERNAME}:${ENCODED_TOKEN}@cnb.cool/${TARGET}.git"
-          git remote add cnb "${AUTH_URL}" 2>/dev/null || git remote set-url cnb "${AUTH_URL}"
+          git remote add cnb "https://cnb.cool/${TARGET}.git" 2>/dev/null || git remote set-url cnb "https://cnb.cool/${TARGET}.git"
           # 读取 CNB 当前 main，使用带 lease 的强制更新：若 CNB 在检查后被他人修改则拒绝覆盖。
           CNB_HEAD="$(git ls-remote cnb refs/heads/main | awk '{print $1}')"
           if [ -n "${CNB_HEAD}" ]; then
