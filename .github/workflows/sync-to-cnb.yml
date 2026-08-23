@@ -42,9 +42,8 @@ jobs:
         env:
           CNB_USERNAME: ${{ secrets.CNB_USERNAME }}
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          CNB_TARGET_REPO: ${{ vars.CNB_TARGET_REPO }}
         run: |
-          TARGET="${CNB_TARGET_REPO}"
+          TARGET="morrowfactory/open-cargo-planner"
           ENCODED_USERNAME="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_USERNAME}")"
           ENCODED_TOKEN="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_TOKEN}")"
           CNB_URL="https://${ENCODED_USERNAME}:${ENCODED_TOKEN}@cnb.cool/${TARGET}.git"
