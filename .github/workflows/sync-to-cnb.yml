@@ -44,7 +44,9 @@ jobs:
           CNB_TARGET_REPO: ${{ vars.CNB_TARGET_REPO }}
         run: |
           TARGET="${CNB_TARGET_REPO:-morrowfactory/open-cargo-planner}"
-          AUTH_URL="https://${CNB_USERNAME}:${CNB_TOKEN}@cnb.cool/${TARGET}.git"
+          ENCODED_USERNAME="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_USERNAME}")"
+          ENCODED_TOKEN="$(node -p 'encodeURIComponent(process.argv[1])' "${CNB_TOKEN}")"
+          AUTH_URL="https://${ENCODED_USERNAME}:${ENCODED_TOKEN}@cnb.cool/${TARGET}.git"
           git remote add cnb "${AUTH_URL}" 2>/dev/null || git remote set-url cnb "${AUTH_URL}"
           # 读取 CNB 当前 main，使用带 lease 的强制更新：若 CNB 在检查后被他人修改则拒绝覆盖。
           CNB_HEAD="$(git ls-remote cnb refs/heads/main | awk '{print $1}')"
