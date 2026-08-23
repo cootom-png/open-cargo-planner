@@ -16,9 +16,12 @@ $:
     - runner:
         cpus: 2
       services:
-        - vscode
+        - name: vscode
+          options:
+            onlyPreview: true
+            launch: python3 -m http.server 8686 --bind 0.0.0.0
+            keepAliveTimeout: 2h
+            daemon: true
       stages:
         - name: 安装依赖
           script: npm ci
-        - name: 启动原型预览
-          script: python3 -m http.server 4173 --bind 0.0.0.0
