@@ -1,0 +1,24 @@
+main:
+  push:
+    - stages:
+        - name: 安装依赖
+          image: node:22
+          script: npm ci
+        - name: 运行测试
+          image: node:22
+          script: npm test
+        - name: 类型检查
+          image: node:22
+          script: npm run typecheck
+
+$:
+  vscode:
+    - runner:
+        cpus: 2
+      services:
+        - vscode
+      stages:
+        - name: 安装依赖
+          script: npm ci
+        - name: 启动原型预览
+          script: python3 -m http.server 4173 --bind 0.0.0.0
