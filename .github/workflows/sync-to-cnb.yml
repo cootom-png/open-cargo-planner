@@ -49,7 +49,7 @@ jobs:
         env:
           CNB_TARGET_REPO: ${{ vars.CNB_TARGET_REPO }}
         run: |
-          TARGET="${CNB_TARGET_REPO:-morrowfactory/open-cargo-planner}"
+          TARGET="${CNB_TARGET_REPO}"
           git remote add cnb "https://cnb.cool/${TARGET}.git" 2>/dev/null || git remote set-url cnb "https://cnb.cool/${TARGET}.git"
           # 读取 CNB 当前 main，使用带 lease 的强制更新：若 CNB 在检查后被他人修改则拒绝覆盖。
           CNB_HEAD="$(git ls-remote cnb refs/heads/main | awk '{print $1}')"
