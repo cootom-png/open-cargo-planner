@@ -44,6 +44,8 @@ jobs:
         run: |
           git config --global credential.helper store
           printf 'protocol=https\nhost=cnb.cool\nusername=%s\npassword=%s\n\n' "${CNB_USERNAME}" "${CNB_TOKEN}" | git credential approve
+          FILLED="$(printf 'protocol=https\nhost=cnb.cool\n\n' | git credential fill)"
+          test "$(printf '%s\n' "${FILLED}" | sed -n 's/^username=//p')" = "${CNB_USERNAME}" || { echo "CNB Git 凭据未写入 runner"; exit 1; }
 
       - name: 同步到 CNB 仓库
         env:
