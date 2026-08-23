@@ -19,7 +19,7 @@ $:
         - name: vscode
           options:
             onlyPreview: true
-            launch: python3 -m http.server 8686 --bind 0.0.0.0
+            launch: npm run dev
             keepAliveTimeout: 2h
             daemon: true
       stages:
