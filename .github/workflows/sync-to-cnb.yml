@@ -39,6 +39,12 @@ jobs:
           TARGET="${CNB_TARGET_REPO:-morrowfactory/open-cargo-planner}"
           AUTH_URL="https://${CNB_USERNAME}:${CNB_TOKEN}@cnb.cool/${TARGET}.git"
           git remote add cnb "${AUTH_URL}" 2>/dev/null || git remote set-url cnb "${AUTH_URL}"
-          # 推送 main 分支（含所有历史 tag），触发 CNB 端构建
-          git push --force cnb main:main
-          git push --tags --force cnb || true
+          # 读取 CNB 当前 main，使用带 lease 的强制更新：若 CNB 在检查后被他人修改则拒绝覆盖。
+          CNB_HEAD="$(git ls-remote cnb refs/heads/main | awk '{print $1}')"
+          if [ -n "${CNB_HEAD}" ]; then
+            git push --force-with-lease=refs/heads/main:${CNB_HEAD} cnb main:main
+          else
+            git push cnb main:main
+          fi
+          # tag 只做普通同步，若 CNB 已存在不同内容的同名 tag 则保留 CNB tag 并给出提示。
+          git push --tags cnb || echo "部分 tag 未同步；main 分支已完成同步。"
