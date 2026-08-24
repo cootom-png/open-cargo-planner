@@ -34,6 +34,8 @@ export interface BrowserPalletInput {
   h: number;
   maxH: number;
   gap: number;
+  packingMode?: "single-sku" | "mixed-max";
+  allowLooseCargo?: boolean;
 }
 
 export interface BrowserSolveInput {
@@ -153,7 +155,10 @@ export function solveForBrowser(input: BrowserSolveInput): BrowserSolveResult {
     return summarize(result, planInput.products, 0, colors);
   }
 
-  const palletResult: PalletPlanResult = solvePallet(planInput);
+  const palletResult: PalletPlanResult = solvePallet(planInput, {
+    mode: input.pallet?.packingMode ?? "mixed-max",
+    allowLooseCargo: input.pallet?.allowLooseCargo ?? true,
+  });
   const result = solvePalletLoading(palletResult.pallets, planInput);
   return summarize(result, planInput.products, palletResult.metrics.palletsUsed, colors);
 }

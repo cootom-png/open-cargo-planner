@@ -1,5 +1,4 @@
 import test from "node:test";
-import assert from "node:assert/strict";
 import { solvePallet, type PalletLoadUnit, type PalletType, type PlanInput } from "../src/index.js";
 
 const ok = (value: unknown, message?: string): void => {
@@ -141,6 +140,44 @@ test("palletPolicy=forbidden 的产品不打托，计入未码", () => {
   const result = solvePallet(input);
   ok(result.pallets.length === 0, "forbidden 产品不应打托");
   ok(result.unloaded.length > 0, "未码 SKU 应记录");
+});
+
+test("P1 模式：同 SKU 单托不混装", () => {
+  const input = plan({
+    products: [
+      product("p1", "SKU-A", { lengthMm: 400, widthMm: 300, heightMm: 200, quantity: 24 }),
+      product("p2", "SKU-B", { lengthMm: 300, widthMm: 200, heightMm: 200, quantity: 24 }),
+    ],
+  });
+  const result = solvePallet(input, { mode: "single-sku", allowLooseCargo: true });
+  ok(result.pallets.length > 0, "应生成托盘");
+  for (const pallet of result.pallets) {
+    ok(new Set(pallet.items.map((item) => item.sku)).size === 1, "同 SKU 模式下每托只能有一个 SKU");
+  }
+});
+
+test("P1 模式：混装最大利用率允许同托多 SKU", () => {
+  const input = plan({
+    products: [
+      product("p1", "SKU-A", { lengthMm: 500, widthMm: 400, heightMm: 200, quantity: 3 }),
+      product("p2", "SKU-B", { lengthMm: 250, widthMm: 200, heightMm: 200, quantity: 20 }),
+    ],
+  });
+  const result = solvePallet(input, { mode: "mixed-max", allowLooseCargo: true });
+  ok(result.pallets.some((pallet) => pallet.skuSummary.length > 1), "混装模式应允许同托多 SKU");
+});
+
+test("P1 散货策略：禁止散货时只打完整层", () => {
+  const input = plan({
+    products: [product("p1", "SKU-A", { lengthMm: 500, widthMm: 300, heightMm: 300, quantity: 8, allowHorizontalRotation: false })],
+  });
+  const allowed = solvePallet(input, { mode: "single-sku", allowLooseCargo: true });
+  const forbidden = solvePallet(input, { mode: "single-sku", allowLooseCargo: false });
+  const allowedCount = allowed.pallets.reduce((sum, pallet) => sum + pallet.items.length, 0);
+  const forbiddenCount = forbidden.pallets.reduce((sum, pallet) => sum + pallet.items.length, 0);
+  ok(allowedCount === 8, "允许散货时应码完尾数");
+  ok(forbiddenCount < allowedCount, "禁止散货时不得码放不足整层的尾数");
+  ok((forbidden.unloaded[0]?.remaining ?? 0) > 0, "不足整层的尾数应保留为未码货物");
 });
 
 test("稳定性约束：大箱优先放底层", () => {

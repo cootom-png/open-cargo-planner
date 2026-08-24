@@ -7,21 +7,29 @@ import type {
   UnloadedItem,
 } from "./types.js";
 
+export type PalletPackingMode = "single-sku" | "mixed-max";
+
 export interface PalletPackingOptions {
+  /** 码放模式：同 SKU 单托，或不同 SKU 混装并优先利用率。 */
+  mode?: PalletPackingMode;
+  /** 是否允许不足整层的散货放在托盘顶层（默认 true）。 */
+  allowLooseCargo?: boolean;
   /** 是否启用层间 90° 交错（默认 true）。 */
   layerInterlock?: boolean;
   /** 单托盘最大码放件数保护。 */
   maxItemsPerPallet?: number;
-  /** 稳定性级别：严格/平衡/宽松（默认 balanced）*/
-  stabilityLevel?: 'strict' | 'balanced' | 'relaxed';
-  /** 最小支撑率（0-1）。严格模式默认 0.8，平衡模式 0.6，宽松模式 0.4 */
+  /** 稳定性级别：严格/平衡/宽松（默认 balanced）。 */
+  stabilityLevel?: "strict" | "balanced" | "relaxed";
+  /** 最小支撑率（0-1）。严格模式默认 0.8，平衡模式 0.6，宽松模式 0.4。 */
   minSupportRatio?: number;
 }
 
 interface OptionsRequired {
+  mode: PalletPackingMode;
+  allowLooseCargo: boolean;
   layerInterlock: boolean;
   maxItemsPerPallet: number;
-  stabilityLevel: 'strict' | 'balanced' | 'relaxed';
+  stabilityLevel: "strict" | "balanced" | "relaxed";
   minSupportRatio: number;
 }
 
@@ -63,6 +71,8 @@ function normalizeOptions(options?: PalletPackingOptions): OptionsRequired {
   }
   
   return {
+    mode: options?.mode ?? "mixed-max",
+    allowLooseCargo: options?.allowLooseCargo ?? true,
     layerInterlock: options?.layerInterlock ?? true,
     maxItemsPerPallet: options?.maxItemsPerPallet ?? 2000,
     stabilityLevel,
@@ -125,16 +135,26 @@ export class PalletPackingSolver {
       guard += 1;
       // 找一个仍有需求、可打托的产品作为当前托盘主类型
       let chosenIdx = -1;
+      let chosenProductIndex = -1;
       for (const pi of palletizable) {
         if (pending[pi]!.quantity > 0) {
           chosenIdx = palletIndexFor.get(pi)!;
+          chosenProductIndex = pi;
           break;
         }
       }
       if (chosenIdx < 0) break;
       const palletType = input.palletTypes[chosenIdx]!;
 
-      const unit = this.buildPalletUnit(input, pending, chosenIdx, palletType, orientCache, warnings);
+      const unit = this.buildPalletUnit(
+        input,
+        pending,
+        chosenIdx,
+        palletType,
+        orientCache,
+        warnings,
+        this.options.mode === "single-sku" ? chosenProductIndex : undefined,
+      );
       if (unit.items.length === 0) {
         // 该托盘无法再塞入任何产品（产品耗尽或托盘过小）
         if (pending.every((u) => u.quantity <= 0 || input.products[u.productIndex]!.palletPolicy === "forbidden")) break;
@@ -189,6 +209,7 @@ export class PalletPackingSolver {
     pallet: PalletType,
     orientCache: Map<number, Orientation[]>,
     warnings: string[],
+    restrictedProductIndex?: number,
   ): PalletLoadUnit {
     const deckHeight = pallet.heightMm;
     const maxLoadedHeight = pallet.maxLoadedHeightMm;
@@ -221,6 +242,7 @@ export class PalletPackingSolver {
       type Cand = { pendingIndex: number; orientation: Orientation; weightG: number; score: number };
       const candidates: Cand[] = [];
       for (let pi = 0; pi < pending.length; pi += 1) {
+        if (restrictedProductIndex !== undefined && pi !== restrictedProductIndex) continue;
         const u = pending[pi]!;
         if (u.quantity <= 0) continue;
         const o = orientCache.get(u.productIndex) ?? [];
@@ -260,28 +282,36 @@ export class PalletPackingSolver {
         return volB - volA;
       });
       
-      // 选择体积最大且剩余需求最多的产品作为本层主导
+      // 选择体积最大且满足当前散货策略的产品作为本层主导。
       let mainCand: Cand | null = null;
       for (const cand of candidates) {
         const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
-        if (remaining > 0) {
+        const gap = this.dynamicGap(cand.orientation);
+        const fullLayerCapacity =
+          Math.floor((layerL + EPS) / cand.orientation.lengthMm) *
+          Math.floor((layerW + gap + EPS) / (cand.orientation.widthMm + gap));
+        if (remaining > 0 && (this.options.allowLooseCargo || remaining >= fullLayerCapacity)) {
           mainCand = cand;
           break;
         }
       }
-      
+
       if (!mainCand) break;
-      
-      // 2. 筛选可回填的小产品（体积 < 主导产品30%，高度兼容±20mm）
+
+      const mainGap = this.dynamicGap(mainCand.orientation);
+
+      // 2. 混装最大化模式允许高度兼容的小产品回填；同 SKU 单托或禁止散货时不回填。
       const mainVolume = mainCand.orientation.lengthMm * mainCand.orientation.widthMm * mainCand.orientation.heightMm;
       const fillCands: Cand[] = [];
-      for (const cand of candidates) {
-        if (cand === mainCand) continue;
-        const candVolume = cand.orientation.lengthMm * cand.orientation.widthMm * cand.orientation.heightMm;
-        if (candVolume > mainVolume * 0.3) continue; // 体积过大
-        if (Math.abs(cand.orientation.heightMm - mainCand.orientation.heightMm) > 20) continue; // 高度不兼容
-        const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
-        if (remaining > 0) fillCands.push(cand);
+      if (this.options.mode === "mixed-max" && this.options.allowLooseCargo) {
+        for (const cand of candidates) {
+          if (cand === mainCand) continue;
+          const candVolume = cand.orientation.lengthMm * cand.orientation.widthMm * cand.orientation.heightMm;
+          if (candVolume > mainVolume) continue;
+          if (Math.abs(cand.orientation.heightMm - mainCand.orientation.heightMm) > 20) continue;
+          const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
+          if (remaining > 0) fillCands.push(cand);
+        }
       }
       
       // 3. 按剩余需求降序排序回填候选
@@ -356,8 +386,7 @@ export class PalletPackingSolver {
           }
         }
         // 下一 shelf：动态间隙调整
-        const gap = Math.max(2, Math.min(5, Math.min(mainCand.orientation.lengthMm, mainCand.orientation.widthMm) * 0.01));
-        y += effRowWidth + gap;
+        y += effRowWidth + mainGap;
       }
 
       if (placedThisLayer === 0) {
@@ -437,6 +466,10 @@ export class PalletPackingSolver {
     };
   }
 
+  private dynamicGap(ori: Orientation): number {
+    return Math.max(2, Math.min(5, Math.min(ori.lengthMm, ori.widthMm) * 0.01));
+  }
+
   /**
    * 朝向评分函数：为每个朝向计算优先级分数
    * - 优先长边沿托盘长方向（减少行数）
@@ -477,8 +510,8 @@ export class PalletPackingSolver {
     const supportingBoxes = placedBoxes.filter((pb) => Math.abs(pb.z2 - box.z) < EPS);
     
     if (supportingBoxes.length === 0) {
-      // 没有支撑箱体（应该是托盘表面），返回 1.0
-      return 1.0;
+      // 只有直接位于托盘表面的箱体可视为完全支撑；上层无支撑时禁止悬空。
+      return box.z <= EPS ? 1.0 : 0;
     }
     
     // 计算底面被支撑的面积
