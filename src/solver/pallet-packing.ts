@@ -7,16 +7,30 @@ import type {
   UnloadedItem,
 } from "./types.js";
 
+export type PalletPackingMode = "single-sku" | "mixed-max";
+
 export interface PalletPackingOptions {
+  /** 码放模式：同 SKU 单托，或不同 SKU 混装并优先利用率。 */
+  mode?: PalletPackingMode;
+  /** 是否允许不足整层的散货放在托盘顶层（默认 true）。 */
+  allowLooseCargo?: boolean;
   /** 是否启用层间 90° 交错（默认 true）。 */
   layerInterlock?: boolean;
   /** 单托盘最大码放件数保护。 */
   maxItemsPerPallet?: number;
+  /** 稳定性级别：严格/平衡/宽松（默认 balanced）。 */
+  stabilityLevel?: "strict" | "balanced" | "relaxed";
+  /** 最小支撑率（0-1）。严格模式默认 0.8，平衡模式 0.6，宽松模式 0.4。 */
+  minSupportRatio?: number;
 }
 
 interface OptionsRequired {
+  mode: PalletPackingMode;
+  allowLooseCargo: boolean;
   layerInterlock: boolean;
   maxItemsPerPallet: number;
+  stabilityLevel: "strict" | "balanced" | "relaxed";
+  minSupportRatio: number;
 }
 
 interface Box3 {
@@ -45,9 +59,24 @@ function makeBox(x: number, y: number, z: number, length: number, width: number,
 }
 
 function normalizeOptions(options?: PalletPackingOptions): OptionsRequired {
+  const stabilityLevel = options?.stabilityLevel ?? 'balanced';
+  let defaultMinSupportRatio: number;
+  
+  if (stabilityLevel === 'strict') {
+    defaultMinSupportRatio = 0.8;
+  } else if (stabilityLevel === 'relaxed') {
+    defaultMinSupportRatio = 0.4;
+  } else {
+    defaultMinSupportRatio = 0.6;
+  }
+  
   return {
+    mode: options?.mode ?? "mixed-max",
+    allowLooseCargo: options?.allowLooseCargo ?? true,
     layerInterlock: options?.layerInterlock ?? true,
     maxItemsPerPallet: options?.maxItemsPerPallet ?? 2000,
+    stabilityLevel,
+    minSupportRatio: options?.minSupportRatio ?? defaultMinSupportRatio,
   };
 }
 
@@ -78,7 +107,7 @@ export class PalletPackingSolver {
         warnings.push(`SKU ${p.sku} 必须打托但没有可用托盘，跳过。`);
       }
     });
-    // required 优先，体积降序
+    // required 优先，体积降序（大箱优先）
     palletizable.sort((a, b) => {
       const pa = input.products[a]!;
       const pb = input.products[b]!;
@@ -106,16 +135,26 @@ export class PalletPackingSolver {
       guard += 1;
       // 找一个仍有需求、可打托的产品作为当前托盘主类型
       let chosenIdx = -1;
+      let chosenProductIndex = -1;
       for (const pi of palletizable) {
         if (pending[pi]!.quantity > 0) {
           chosenIdx = palletIndexFor.get(pi)!;
+          chosenProductIndex = pi;
           break;
         }
       }
       if (chosenIdx < 0) break;
       const palletType = input.palletTypes[chosenIdx]!;
 
-      const unit = this.buildPalletUnit(input, pending, chosenIdx, palletType, orientCache, warnings);
+      const unit = this.buildPalletUnit(
+        input,
+        pending,
+        chosenIdx,
+        palletType,
+        orientCache,
+        warnings,
+        this.options.mode === "single-sku" ? chosenProductIndex : undefined,
+      );
       if (unit.items.length === 0) {
         // 该托盘无法再塞入任何产品（产品耗尽或托盘过小）
         if (pending.every((u) => u.quantity <= 0 || input.products[u.productIndex]!.palletPolicy === "forbidden")) break;
@@ -170,6 +209,7 @@ export class PalletPackingSolver {
     pallet: PalletType,
     orientCache: Map<number, Orientation[]>,
     warnings: string[],
+    restrictedProductIndex?: number,
   ): PalletLoadUnit {
     const deckHeight = pallet.heightMm;
     const maxLoadedHeight = pallet.maxLoadedHeightMm;
@@ -202,6 +242,7 @@ export class PalletPackingSolver {
       type Cand = { pendingIndex: number; orientation: Orientation; weightG: number; score: number };
       const candidates: Cand[] = [];
       for (let pi = 0; pi < pending.length; pi += 1) {
+        if (restrictedProductIndex !== undefined && pi !== restrictedProductIndex) continue;
         const u = pending[pi]!;
         if (u.quantity <= 0) continue;
         const o = orientCache.get(u.productIndex) ?? [];
@@ -233,23 +274,57 @@ export class PalletPackingSolver {
 
       if (candidates.length === 0) break;
 
-      // 单层单朝向策略：选择剩余需求最大的产品作为本层主导产品
-      let chosenCand: Cand | null = null;
-      let maxRemaining = 0;
+      // 智能混层策略：选择主导产品 + 允许小产品回填
+      // 1. 按体积降序排序候选（大箱优先作为本层主导，确保稳定性）
+      candidates.sort((a, b) => {
+        const volA = a.orientation.lengthMm * a.orientation.widthMm * a.orientation.heightMm;
+        const volB = b.orientation.lengthMm * b.orientation.widthMm * b.orientation.heightMm;
+        return volB - volA;
+      });
+      
+      // 选择体积最大且满足当前散货策略的产品作为本层主导。
+      let mainCand: Cand | null = null;
       for (const cand of candidates) {
         const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
-        if (remaining > maxRemaining) {
-          maxRemaining = remaining;
-          chosenCand = cand;
+        const gap = this.dynamicGap(cand.orientation);
+        const fullLayerCapacity =
+          Math.floor((layerL + EPS) / cand.orientation.lengthMm) *
+          Math.floor((layerW + gap + EPS) / (cand.orientation.widthMm + gap));
+        if (remaining > 0 && (this.options.allowLooseCargo || remaining >= fullLayerCapacity)) {
+          mainCand = cand;
+          break;
+        }
+      }
+
+      if (!mainCand) break;
+
+      const mainGap = this.dynamicGap(mainCand.orientation);
+
+      // 2. 混装最大化模式允许高度兼容的小产品回填；同 SKU 单托或禁止散货时不回填。
+      const mainVolume = mainCand.orientation.lengthMm * mainCand.orientation.widthMm * mainCand.orientation.heightMm;
+      const fillCands: Cand[] = [];
+      if (this.options.mode === "mixed-max" && this.options.allowLooseCargo) {
+        for (const cand of candidates) {
+          if (cand === mainCand) continue;
+          const candVolume = cand.orientation.lengthMm * cand.orientation.widthMm * cand.orientation.heightMm;
+          if (candVolume > mainVolume) continue;
+          if (Math.abs(cand.orientation.heightMm - mainCand.orientation.heightMm) > 20) continue;
+          const remaining = pending[cand.pendingIndex]!.quantity - (placedByPending.get(cand.pendingIndex) ?? 0);
+          if (remaining > 0) fillCands.push(cand);
         }
       }
       
-      if (!chosenCand) break;
+      // 3. 按剩余需求降序排序回填候选
+      fillCands.sort((a, b) => {
+        const remA = pending[a.pendingIndex]!.quantity - (placedByPending.get(a.pendingIndex) ?? 0);
+        const remB = pending[b.pendingIndex]!.quantity - (placedByPending.get(b.pendingIndex) ?? 0);
+        return remB - remA;
+      });
       
-      // 本层只使用选定的产品和朝向
-      const layerCandidates = [chosenCand];
-      const effHeight = chosenCand.orientation.heightMm;
-      const effRowWidth = chosenCand.orientation.widthMm;
+      // 本层候选：主导产品在前，回填产品在后
+      const layerCandidates = [mainCand, ...fillCands];
+      const effHeight = mainCand.orientation.heightMm;
+      const effRowWidth = mainCand.orientation.widthMm;
 
       if (currentTop + effHeight > maxLoadedHeight - deckHeight + EPS) break;
 
@@ -272,10 +347,27 @@ export class PalletPackingSolver {
             const alreadyPlaced = placedByPending.get(cand.pendingIndex) ?? 0;
             const remaining = pending[cand.pendingIndex]!.quantity;
             if (alreadyPlaced >= remaining) continue;
-            const box = makeBox(x, y, currentTop, cand.orientation.lengthMm, cand.orientation.widthMm, effHeight);
+            const box = makeBox(x, y, currentTop, cand.orientation.lengthMm, cand.orientation.widthMm, cand.orientation.heightMm);
             if (x + box.length > layerL + EPS || y + box.width > layerW + EPS) continue;
             if (placedBoxes.some((pb) => boxOverlap(pb, box))) continue;
             if (cargoWeight + cand.weightG > maxLoad + EPS) break;
+            
+            // 稳定性检查：当前箱体的支撑率
+            if (currentTop > 0) {
+              const supportRatio = this.calculateSupportRatio(box, placedBoxes);
+              if (supportRatio < this.options.minSupportRatio - EPS) {
+                continue; // 支撑不足，跳过该位置
+              }
+            }
+            
+            // 回填数量控制：回填产品不超过本层总数的20%
+            const isMainProduct = cand === mainCand;
+            if (!isMainProduct) {
+              const mainProductCount = placement.filter((p) => p.cand === mainCand).length;
+              const fillProductCount = placement.filter((p) => p.cand !== mainCand).length;
+              if (fillProductCount >= mainProductCount * 0.25) continue; // 回填已达上限
+            }
+            
             // 放入
             placement.push({ cand, box });
             placedByPending.set(cand.pendingIndex, alreadyPlaced + 1);
@@ -293,8 +385,8 @@ export class PalletPackingSolver {
             break;
           }
         }
-        // 下一 shelf
-        y += effRowWidth + 5;
+        // 下一 shelf：动态间隙调整
+        y += effRowWidth + mainGap;
       }
 
       if (placedThisLayer === 0) {
@@ -323,6 +415,34 @@ export class PalletPackingSolver {
       layerIndex += 1;
     }
 
+    // 计算各层利用率统计
+    const layerUtilizations: Array<{ layerIndex: number; utilization: number; itemCount: number; mainSku: string }> = [];
+    for (let i = 0; i < layerIndex; i++) {
+      const layerItems = items.filter((it) => it.layerIndex === i);
+      if (layerItems.length === 0) continue;
+      
+      const layerVolume = layerItems.reduce((s, it) => 
+        s + it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm, 0
+      );
+      const layerHeight = Math.max(...layerItems.map((it) => it.z + it.orientation.heightMm)) - 
+                          Math.min(...layerItems.map((it) => it.z));
+      const layerCapacity = layerL * layerW * layerHeight;
+      
+      // 找出该层主导 SKU（数量最多）
+      const skuCounts = new Map<string, number>();
+      for (const it of layerItems) {
+        skuCounts.set(it.sku, (skuCounts.get(it.sku) ?? 0) + 1);
+      }
+      const mainSku = [...skuCounts.entries()].reduce((a, b) => a[1] > b[1] ? a : b)[0];
+      
+      layerUtilizations.push({
+        layerIndex: i,
+        utilization: layerCapacity > 0 ? layerVolume / layerCapacity : 0,
+        itemCount: layerItems.length,
+        mainSku,
+      });
+    }
+
     const boxVolume = items.reduce((s, it) => s + it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm, 0);
     const capacityDenom = layerL * layerW * currentTop;
 
@@ -342,7 +462,12 @@ export class PalletPackingSolver {
       totalWeightG: cargoWeight + (pallet.emptyWeightG ?? 0),
       layerCount: layerIndex,
       utilization: capacityDenom > 0 ? boxVolume / capacityDenom : 0,
+      layerUtilizations,
     };
+  }
+
+  private dynamicGap(ori: Orientation): number {
+    return Math.max(2, Math.min(5, Math.min(ori.lengthMm, ori.widthMm) * 0.01));
   }
 
   /**
@@ -372,6 +497,41 @@ export class PalletPackingSolver {
     score += (countX * countY) * 0.5;
     
     return score;
+  }
+
+  /**
+   * 计算箱体的支撑率：底面被下层箱体支撑的面积比例
+   * @param box 待检查的箱体
+   * @param placedBoxes 已放置的所有箱体
+   * @returns 支撑率 (0-1)
+   */
+  private calculateSupportRatio(box: Box3, placedBoxes: Box3[]): number {
+    // 找出所有在当前箱体正下方的箱体（z2 = box.z）
+    const supportingBoxes = placedBoxes.filter((pb) => Math.abs(pb.z2 - box.z) < EPS);
+    
+    if (supportingBoxes.length === 0) {
+      // 只有直接位于托盘表面的箱体可视为完全支撑；上层无支撑时禁止悬空。
+      return box.z <= EPS ? 1.0 : 0;
+    }
+    
+    // 计算底面被支撑的面积
+    const boxBottomArea = box.length * box.width;
+    let supportedArea = 0;
+    
+    for (const sb of supportingBoxes) {
+      // 计算水平重叠区域
+      const overlapX1 = Math.max(box.x, sb.x);
+      const overlapX2 = Math.min(box.x2, sb.x2);
+      const overlapY1 = Math.max(box.y, sb.y);
+      const overlapY2 = Math.min(box.y2, sb.y2);
+      
+      if (overlapX2 > overlapX1 + EPS && overlapY2 > overlapY1 + EPS) {
+        const overlapArea = (overlapX2 - overlapX1) * (overlapY2 - overlapY1);
+        supportedArea += overlapArea;
+      }
+    }
+    
+    return boxBottomArea > EPS ? Math.min(1.0, supportedArea / boxBottomArea) : 0;
   }
 }
 

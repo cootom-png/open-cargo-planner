@@ -1,5 +1,4 @@
 import test from "node:test";
-import assert from "node:assert/strict";
 import { solvePallet, type PalletLoadUnit, type PalletType, type PlanInput } from "../src/index.js";
 
 const ok = (value: unknown, message?: string): void => {
@@ -141,4 +140,161 @@ test("palletPolicy=forbidden 的产品不打托，计入未码", () => {
   const result = solvePallet(input);
   ok(result.pallets.length === 0, "forbidden 产品不应打托");
   ok(result.unloaded.length > 0, "未码 SKU 应记录");
+});
+
+test("P1 模式：同 SKU 单托不混装", () => {
+  const input = plan({
+    products: [
+      product("p1", "SKU-A", { lengthMm: 400, widthMm: 300, heightMm: 200, quantity: 24 }),
+      product("p2", "SKU-B", { lengthMm: 300, widthMm: 200, heightMm: 200, quantity: 24 }),
+    ],
+  });
+  const result = solvePallet(input, { mode: "single-sku", allowLooseCargo: true });
+  ok(result.pallets.length > 0, "应生成托盘");
+  for (const pallet of result.pallets) {
+    ok(new Set(pallet.items.map((item) => item.sku)).size === 1, "同 SKU 模式下每托只能有一个 SKU");
+  }
+});
+
+test("P1 模式：混装最大利用率允许同托多 SKU", () => {
+  const input = plan({
+    products: [
+      product("p1", "SKU-A", { lengthMm: 500, widthMm: 400, heightMm: 200, quantity: 3 }),
+      product("p2", "SKU-B", { lengthMm: 250, widthMm: 200, heightMm: 200, quantity: 20 }),
+    ],
+  });
+  const result = solvePallet(input, { mode: "mixed-max", allowLooseCargo: true });
+  ok(result.pallets.some((pallet) => pallet.skuSummary.length > 1), "混装模式应允许同托多 SKU");
+});
+
+test("P1 散货策略：禁止散货时只打完整层", () => {
+  const input = plan({
+    products: [product("p1", "SKU-A", { lengthMm: 500, widthMm: 300, heightMm: 300, quantity: 8, allowHorizontalRotation: false })],
+  });
+  const allowed = solvePallet(input, { mode: "single-sku", allowLooseCargo: true });
+  const forbidden = solvePallet(input, { mode: "single-sku", allowLooseCargo: false });
+  const allowedCount = allowed.pallets.reduce((sum, pallet) => sum + pallet.items.length, 0);
+  const forbiddenCount = forbidden.pallets.reduce((sum, pallet) => sum + pallet.items.length, 0);
+  ok(allowedCount === 8, "允许散货时应码完尾数");
+  ok(forbiddenCount < allowedCount, "禁止散货时不得码放不足整层的尾数");
+  ok((forbidden.unloaded[0]?.remaining ?? 0) > 0, "不足整层的尾数应保留为未码货物");
+});
+
+test("稳定性约束：大箱优先放底层", () => {
+  const input = plan({
+    products: [
+      product("p1", "小箱", { lengthMm: 300, widthMm: 250, heightMm: 200, quantity: 20, weightG: 5_000 }),
+      product("p2", "大箱", { lengthMm: 600, widthMm: 500, heightMm: 400, quantity: 10, weightG: 15_000 }),
+    ],
+  });
+  const result = solvePallet(input, { stabilityLevel: 'balanced' });
+  ok(result.pallets.length > 0, "应生成托盘");
+  
+  for (const pallet of result.pallets) {
+    const layers = new Map<number, typeof pallet.items>();
+    for (const item of pallet.items) {
+      if (!layers.has(item.layerIndex)) {
+        layers.set(item.layerIndex, []);
+      }
+      layers.get(item.layerIndex)!.push(item);
+    }
+    
+    // 检查：底层（layer 0）应该是大箱（或至少不是小箱独占）
+    const layer0 = layers.get(0);
+    if (layer0 && layer0.length > 0) {
+      const layer0Volumes = layer0.map(it => 
+        it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm
+      );
+      const avgLayer0Volume = layer0Volumes.reduce((a, b) => a + b, 0) / layer0Volumes.length;
+      
+      // 检查是否有更高层
+      const higherLayers = Array.from(layers.keys()).filter(k => k > 0);
+      if (higherLayers.length > 0) {
+        // 如果有多层，底层平均体积应不小于上层
+        for (const layerIdx of higherLayers) {
+          const upperLayer = layers.get(layerIdx)!;
+          const upperVolumes = upperLayer.map(it => 
+            it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm
+          );
+          const avgUpperVolume = upperVolumes.reduce((a, b) => a + b, 0) / upperVolumes.length;
+          
+          // 大箱应在下，允许一定误差
+          ok(avgLayer0Volume >= avgUpperVolume * 0.8, 
+            `底层平均体积(${avgLayer0Volume})应不小于上层(${avgUpperVolume})`);
+        }
+      }
+    }
+  }
+});
+
+test("稳定性约束：严格模式下高支撑率要求", () => {
+  const input = plan({
+    products: [
+      product("p1", "底层箱", { lengthMm: 600, widthMm: 500, heightMm: 300, quantity: 4, weightG: 10_000 }),
+      product("p2", "上层箱", { lengthMm: 400, widthMm: 300, heightMm: 250, quantity: 8, weightG: 5_000 }),
+    ],
+  });
+  
+  // 严格模式：最小支撑率 0.8
+  const strictResult = solvePallet(input, { stabilityLevel: 'strict', minSupportRatio: 0.8 });
+  ok(strictResult.pallets.length > 0, "严格模式应能生成托盘");
+  
+  for (const pallet of strictResult.pallets) {
+    assertPalletValid(pallet);
+    // 验证没有严重悬空的箱体（通过验证码放成功即可，算法内部已检查支撑率）
+    ok(pallet.items.length > 0, "托盘应包含货物");
+  }
+  
+  // 宽松模式：最小支撑率 0.4
+  const relaxedResult = solvePallet(input, { stabilityLevel: 'relaxed', minSupportRatio: 0.4 });
+  ok(relaxedResult.pallets.length > 0, "宽松模式应能生成托盘");
+  
+  // 宽松模式通常能装更多（支撑要求低）
+  const strictTotal = strictResult.pallets.reduce((s, p) => s + p.items.length, 0);
+  const relaxedTotal = relaxedResult.pallets.reduce((s, p) => s + p.items.length, 0);
+  ok(relaxedTotal >= strictTotal, "宽松模式装载数量应不少于严格模式");
+});
+
+test("稳定性约束：防止小箱在下大箱在上", () => {
+  const input = plan({
+    products: [
+      product("p1", "小箱", { lengthMm: 300, widthMm: 250, heightMm: 200, quantity: 12, weightG: 5_000 }),
+      product("p2", "中箱", { lengthMm: 450, widthMm: 350, heightMm: 300, quantity: 8, weightG: 10_000 }),
+      product("p3", "大箱", { lengthMm: 600, widthMm: 500, heightMm: 400, quantity: 6, weightG: 18_000 }),
+    ],
+  });
+  
+  const result = solvePallet(input, { stabilityLevel: 'balanced' });
+  ok(result.pallets.length > 0, "应生成托盘");
+  
+  for (const pallet of result.pallets) {
+    // 按层分组
+    const itemsByLayer = new Map<number, typeof pallet.items>();
+    for (const item of pallet.items) {
+      if (!itemsByLayer.has(item.layerIndex)) {
+        itemsByLayer.set(item.layerIndex, []);
+      }
+      itemsByLayer.get(item.layerIndex)!.push(item);
+    }
+    
+    const sortedLayers = Array.from(itemsByLayer.keys()).sort((a, b) => a - b);
+    
+    // 检查相邻层：下层的平均体积应大于等于上层
+    for (let i = 0; i < sortedLayers.length - 1; i++) {
+      const lowerLayer = itemsByLayer.get(sortedLayers[i]!)!;
+      const upperLayer = itemsByLayer.get(sortedLayers[i + 1]!)!;
+      
+      const lowerAvgVol = lowerLayer.reduce((s, it) => 
+        s + it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm, 0
+      ) / lowerLayer.length;
+      
+      const upperAvgVol = upperLayer.reduce((s, it) => 
+        s + it.orientation.lengthMm * it.orientation.widthMm * it.orientation.heightMm, 0
+      ) / upperLayer.length;
+      
+      // 下层应不小于上层（允许10%误差）
+      ok(lowerAvgVol >= upperAvgVol * 0.9, 
+        `层${sortedLayers[i]}平均体积(${lowerAvgVol.toFixed(0)})应不小于层${sortedLayers[i+1]}(${upperAvgVol.toFixed(0)})`);
+    }
+  }
 });

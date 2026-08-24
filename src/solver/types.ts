@@ -90,6 +90,8 @@ export interface PalletLoadUnit {
   layerCount: number;
   /** 空间利用率（货物体积 / 托盘可码放体积），0~1。 */
   utilization: number;
+  /** 各层利用率统计（用于分析优化效果）。 */
+  layerUtilizations?: Array<{ layerIndex: number; utilization: number; itemCount: number; mainSku: string }>;
 }
 
 /** 托盘码放求解结果。 */

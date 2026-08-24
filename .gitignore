@@ -5,3 +5,13 @@ Thumbs.db
 .idea/
 node_modules/
 dist/
+*.log
+.env
+.env.local
+
+# 临时调试文件
+debug.mjs
+commit_msg.txt
+issue-*.md
+issue_*.md
+pallet_packing_issue.md
