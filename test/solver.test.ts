@@ -92,6 +92,29 @@ test("多 SKU 混合装箱且互不重叠", () => {
   ok(result.metrics.loadedVolumeMm3 <= result.metrics.containerVolumeMm3 + 1e-6);
 });
 
+test("水平旋转可填补默认姿态留下的连续侧向通道", () => {
+  const input = plan({
+    products: [
+      product("p1", "BX-1001", {
+        lengthMm: 320,
+        widthMm: 900,
+        heightMm: 310,
+        weightG: 8_500,
+        quantity: 600,
+        allowHorizontalRotation: true,
+        allowSideLoading: false,
+        mustStayUpright: true,
+      }),
+    ],
+  });
+
+  const result = solveLoose(input);
+  assertNoOverlap(result.placements);
+  assert.equal(result.placements.length, 600);
+  assert.deepEqual(result.unloaded, []);
+  ok(result.placements.some((placement) => placement.orientation.code === "WLH"), "应使用水平旋转姿态补齐剩余空间");
+});
+
 test("不能满足时输出未装明细", () => {
   const input = plan({
     products: [

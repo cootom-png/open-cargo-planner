@@ -49,28 +49,25 @@ function contains(inner: Box3, outer: Box3): boolean {
 /**
  * 用已放置箱 occ 从自由空间 free 中切分出互不重叠的最大残块（3 残块剥壳法）。
  * occ 完全落在 free 内（由调用方保证）。返回至多 3 块，互不重叠：
- *   R  = occ 右侧全长条
- *   Fr = occ 前方（y 增大方向）在 x<occ 区的条
- *   T  = occ 上方在 x<occ 且 y<occ 区的条
- * 该法既保证无重叠碎片，也把空间数增长控制在每次 +≤3。
+ *   Fr = occ 前方（y 增大方向）的连续长条
+ *   R  = occ 右侧、尚未被前方条覆盖的条
+ *   T  = occ 上方、尚未被前方条和右侧条覆盖的条
+ * 该法优先保留连续侧向通道，让水平旋转箱可在剩余窄条中继续补装。
  */
 function splitSpace(free: Space, occ: Box3): Space[] {
   const pieces: Space[] = [];
-  // R：右侧全长条（y、z 沿用 free 全区间）
-  if (occ.x2 < free.x2 - EPS) {
-    pieces.push(makeBox(occ.x2, free.y, free.z, free.x2 - occ.x2, free.width, free.height));
-  }
-  // Fr：前方条，x 取 [free.x, occ.x2]，y 从 occ.y2 起
+  // Fr：前方条，x、z 沿用 free 全区间，优先保留整条侧向剩余空间
   if (occ.y2 < free.y2 - EPS) {
-    const xStart = free.x;
-    const xEnd = Math.min(free.x2, occ.x2);
-    if (xEnd - xStart > EPS) {
-      pieces.push(makeBox(xStart, occ.y2, free.z, xEnd - xStart, free.y2 - occ.y2, free.height));
-    }
-  } else if (occ.y2 >= free.y2 - EPS && occ.x2 < free.x2 - EPS) {
-    // occ 占满 y 方向，则前方条退化为右侧条已覆盖，无需额外块
+    pieces.push(makeBox(free.x, occ.y2, free.z, free.length, free.y2 - occ.y2, free.height));
   }
-  // T：上方条，x 取 [free.x, occ.x2]，y 取 [free.y, occ.y2]
+  // R：右侧条，仅覆盖 occ 的 y 区间，避免与前方条重叠
+  if (occ.x2 < free.x2 - EPS) {
+    const yEnd = Math.min(free.y2, occ.y2);
+    if (yEnd - free.y > EPS) {
+      pieces.push(makeBox(occ.x2, free.y, free.z, free.x2 - occ.x2, yEnd - free.y, free.height));
+    }
+  }
+  // T：上方条，仅覆盖 occ 左下足迹，避免与前方条和右侧条重叠
   if (occ.z2 < free.z2 - EPS) {
     const xStart = free.x;
     const xEnd = Math.min(free.x2, occ.x2);
