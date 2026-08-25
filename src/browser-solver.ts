@@ -67,7 +67,7 @@ function toProducts(input: BrowserSolveInput): ProductType[] {
     allowHorizontalRotation: product.rotate,
     allowSideLoading: product.side,
     allowUpsideDown: false,
-    mustStayUpright: true,
+    mustStayUpright: !product.side,
     stackable: true,
     palletPolicy: input.mode === "pallet" ? "required" : "auto",
     priority: index,
